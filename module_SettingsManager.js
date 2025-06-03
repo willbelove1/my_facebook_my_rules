@@ -1,12 +1,4 @@
-// ==UserScript==
-// @name         FBCMF SettingsManager (Fixed for Violentmonkey)
-// @namespace    http://tampermonkey.net/
-// @version      1.1
-// @description  Provides API for storing/retrieving settings using GM_setValue/GM_getValue
-// @match        *://*.facebook.com/*
-// @grant        GM_setValue
-// @grant        GM_getValue
-// ==/UserScript==
+
 
 /**
  * Module: SettingsManager (Fixed for Violentmonkey)
