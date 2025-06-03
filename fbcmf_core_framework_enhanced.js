@@ -1,12 +1,4 @@
-// ==UserScript==
-// @name         FBCMF Core Framework (Enhanced + GM Storage Delegate)
-// @namespace    http://tampermonkey.net/
-// @version      1.3.0
-// @description  Core framework for FBCMF, delegates settings to SettingsManager (Violentmonkey)
-// @match        *://*.facebook.com/*
-// @grant        GM_setValue
-// @grant        GM_getValue
-// ==/UserScript==
+
 
 /**
  * FBCMF - Facebook Cleaner Modular Framework (Core)
