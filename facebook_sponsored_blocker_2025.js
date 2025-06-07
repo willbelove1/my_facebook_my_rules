@@ -241,6 +241,142 @@ FBCMF.registerModule('blockSponsored', async ({ DOMUtils, settings, FilterRegist
   }
 
   // === AUTO-REPORTING SYSTEM ===
+  
+  // Track posts that user manually hides to learn from Facebook's response
+  const manuallyHiddenPosts = new WeakMap();
+  const confirmedAds = [];
+
+  function setupHideButtonListeners() {
+    // Monitor clicks on hide/close buttons (X button)
+    document.addEventListener('click', function(event) {
+      const target = event.target;
+      
+      // Find potential hide buttons
+      const hideButton = target.closest('[role="button"][aria-label*="Hide"], [role="button"][aria-label*="Ẩn"], [aria-label*="More options"], [aria-label*="Tùy chọn"]');
+      
+      if (hideButton) {
+        // Find the parent post
+        const post = hideButton.closest('[role="article"], [data-pagelet*="FeedUnit"], div[data-testid*="story"]');
+        
+        if (post && !manuallyHiddenPosts.has(post)) {
+          manuallyHiddenPosts.set(post, {
+            timestamp: Date.now(),
+            domStructure: extractDOMStructure(post),
+            hideButtonInfo: {
+              ariaLabel: hideButton.getAttribute('aria-label'),
+              className: hideButton.className,
+              innerHTML: hideButton.innerHTML.substring(0, 200)
+            }
+          });
+          
+          // Watch for Facebook's response after hiding
+          setTimeout(() => checkForAdConfirmation(post), 1000);
+          setTimeout(() => checkForAdConfirmation(post), 3000);
+          setTimeout(() => checkForAdConfirmation(post), 5000);
+        }
+      }
+    }, true);
+  }
+
+  function checkForAdConfirmation(post) {
+    // Look for Facebook's "Đã ẩn quảng cáo" or "Ad hidden" messages
+    const adHiddenMessages = [
+      'đã ẩn quảng cáo',
+      'ad hidden',
+      'advertisement hidden', 
+      'sponsored post hidden',
+      'quảng cáo đã được ẩn',
+      'bạn sẽ không thấy quảng cáo này nữa',
+      "you won't see this ad again"
+    ];
+
+    // Check for confirmation messages in various locations
+    const possibleMessageContainers = [
+      // Toast/notification messages
+      document.querySelectorAll('[role="alert"], [role="status"], .notificationContent'),
+      // Overlay messages
+      document.querySelectorAll('[data-testid*="toast"], [data-testid*="notification"]'),
+      // Inline messages (where the post was)
+      post ? [post] : [],
+      // General message containers
+      document.querySelectorAll('div[style*="position: fixed"], div[style*="z-index"]')
+    ].flat();
+
+    for (const container of possibleMessageContainers) {
+      if (!container) continue;
+      
+      const text = (container.textContent || '').toLowerCase();
+      const isAdConfirmation = adHiddenMessages.some(msg => text.includes(msg));
+      
+      if (isAdConfirmation) {
+        // BINGO! Facebook confirmed this was an ad
+        const postData = manuallyHiddenPosts.get(post);
+        if (postData) {
+          const confirmedAd = {
+            ...postData,
+            confirmedAt: Date.now(),
+            confirmationText: container.textContent.substring(0, 200),
+            confirmationType: 'facebook-hide-confirmation',
+            wasDetectedByScript: sponsoredCache.get(post) || false
+          };
+
+          confirmedAds.push(confirmedAd);
+          
+          console.log('[blockSponsored] 🎯 CONFIRMED AD by Facebook:', confirmedAd);
+          
+          // If our script didn't catch this, it's a missed detection
+          if (!confirmedAd.wasDetectedByScript) {
+            console.warn('[blockSponsored] ❌ MISSED DETECTION - Facebook confirmed ad that we missed!');
+            learnFromMissedAd(confirmedAd);
+          } else {
+            console.log('[blockSponsored] ✅ CORRECT DETECTION - We caught this ad correctly!');
+          }
+          
+          return true;
+        }
+      }
+    }
+    
+    return false;
+  }
+
+  function learnFromMissedAd(confirmedAd) {
+    // Extract patterns from ads we missed
+    const domStructure = confirmedAd.domStructure;
+    if (!domStructure) return;
+
+    // Look for new patterns we should add
+    const newPatterns = {
+      dataTestIds: domStructure.attributes['data-testid'],
+      className: domStructure.className,
+      ariaLabels: confirmedAd.hideButtonInfo?.ariaLabel,
+      textPatterns: extractPotentialPatterns(domStructure.textContent)
+    };
+
+    suspectedPosts.push({
+      ...confirmedAd,
+      type: 'confirmed-missed-ad',
+      suggestedPatterns: newPatterns,
+      priority: 'HIGH' // This should be fixed ASAP
+    });
+
+    if (settings.verbosity === 'verbose') {
+      console.error('[blockSponsored] 🚨 LEARNING FROM MISSED AD:', newPatterns);
+    }
+  }
+
+  function extractPotentialPatterns(text) {
+    if (!text) return [];
+    
+    const words = text.toLowerCase().split(/\s+/);
+    const potentialSponsoredWords = words.filter(word => 
+      word.length > 3 && 
+      /(sponsor|tài|trợ|quảng|cáo|ad|promo|shop|buy|sale)/i.test(word)
+    );
+    
+    return potentialSponsoredWords.slice(0, 5); // Limit to prevent noise
+  }
+
   function reportSuspiciousPost(post) {
     const suspiciousIndicators = detectSuspiciousPatterns(post);
     
@@ -286,11 +422,17 @@ FBCMF.registerModule('blockSponsored', async ({ DOMUtils, settings, FilterRegist
       timestamp: new Date().toISOString(),
       detectedPosts: detectionLogs.filter(log => log.isSponsored),
       suspectedPosts: suspectedPosts,
+      confirmedAds: confirmedAds,
+      missedAds: confirmedAds.filter(ad => !ad.wasDetectedByScript),
       statistics: {
         totalProcessed: detectionLogs.length,
         totalDetected: detectionLogs.filter(log => log.isSponsored).length,
         totalSuspected: suspectedPosts.length,
-        detectionRate: (detectionLogs.filter(log => log.isSponsored).length / detectionLogs.length * 100).toFixed(2) + '%'
+        totalConfirmed: confirmedAds.length,
+        totalMissed: confirmedAds.filter(ad => !ad.wasDetectedByScript).length,
+        detectionRate: (detectionLogs.filter(log => log.isSponsored).length / detectionLogs.length * 100).toFixed(2) + '%',
+        accuracy: confirmedAds.length > 0 ? 
+          (confirmedAds.filter(ad => ad.wasDetectedByScript).length / confirmedAds.length * 100).toFixed(2) + '%' : 'N/A'
       }
     };
     
@@ -311,10 +453,24 @@ FBCMF.registerModule('blockSponsored', async ({ DOMUtils, settings, FilterRegist
     exportLogs: exportDetectionLogs,
     getSuspectedPosts: () => suspectedPosts,
     getDetectionLogs: () => detectionLogs,
+    getConfirmedAds: () => confirmedAds,
+    getMissedAds: () => confirmedAds.filter(ad => !ad.wasDetectedByScript),
+    getCorrectDetections: () => confirmedAds.filter(ad => ad.wasDetectedByScript),
+    getAccuracyStats: () => {
+      const total = confirmedAds.length;
+      const correct = confirmedAds.filter(ad => ad.wasDetectedByScript).length;
+      return {
+        total: total,
+        correct: correct,
+        missed: total - correct,
+        accuracy: total > 0 ? (correct / total * 100).toFixed(2) + '%' : 'N/A'
+      };
+    },
     clearLogs: () => {
       detectionLogs.length = 0;
       suspectedPosts.length = 0;
-      console.log('[blockSponsored] Logs cleared');
+      confirmedAds.length = 0;
+      console.log('[blockSponsored] All logs cleared');
     }
   };
 
@@ -342,9 +498,13 @@ FBCMF.registerModule('blockSponsored', async ({ DOMUtils, settings, FilterRegist
     }
   }, 30000);
 
+  // Initialize hide button monitoring
+  setupHideButtonListeners();
+
   if (settings.verbosity === 'verbose') {
     console.log('[blockSponsored] Enhanced blocker with auto-reporting initialized');
     console.log('[blockSponsored] Debug functions available at window.FBCMF_SponsoredDebug');
     console.log('[blockSponsored] Use FBCMF_SponsoredDebug.exportLogs() to see detection data');
+    console.log('[blockSponsored] Hide button monitoring active - will learn from Facebook confirmations');
   }
 });
